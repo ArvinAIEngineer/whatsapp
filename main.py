@@ -1,25 +1,19 @@
 import os
-import json
 import sqlite3
-from flask import Flask, jsonify, request
+from flask import Flask, request
 from openai import OpenAI
 from dotenv import load_dotenv
 from twilio.twiml.messaging_response import MessagingResponse
 
-# Load environment variables
 load_dotenv()
 
-# Initialize Flask app
 app = Flask(__name__)
 
-# Initialize OpenAI client
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# SQLite database connection
 def connect_to_db():
     return sqlite3.connect('phone.db')
 
-# Ensure the phone_data table exists
 def ensure_table_exists():
     conn = connect_to_db()
     cursor = conn.cursor()
@@ -33,16 +27,21 @@ def ensure_table_exists():
     conn.commit()
     conn.close()
 
-# Fetch details from the database
 def fetch_details_from_db(phone_number):
-    conn = connect_to_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT details FROM phone_data WHERE phone_number = ?', (phone_number,))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
+    try:
+        if phone_number.startswith("whatsapp:"):
+            phone_number = phone_number[9:]  # Remove 'whatsapp:' prefix
 
-# Classify the query
+        conn = connect_to_db()
+        cursor = conn.cursor()
+        cursor.execute('SELECT details FROM phone_data WHERE phone_number = ?', (phone_number,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        print(f"Database error: {e}")
+        return None
+
 def classify_query(query):
     prompt = f"""Classify the following query into one of two categories:
     1. Checking details - if the query is about verifying or retrieving employee specific details.
@@ -51,26 +50,23 @@ def classify_query(query):
     Query: {query}
 
     Respond with only the category number (1 or 2)."""
-
-    try:  # Add error handling for OpenAI API
+    try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # Or your preferred model
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=10
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"Error classifying query: {e}")
-        return None  # Or return a default category if you prefer
+        return None
 
-
-# Generate a response
 def generate_response(query, context):
-    try:  # Error handling for OpenAI API
+    try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # Or your preferred model
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "system", "content": "You are a helpful assistant. Keep responses concise and limited to 2 sentences."},
                 {"role": "user", "content": f"Query: {query}\nContext: {context}"}
             ],
             max_tokens=300
@@ -78,34 +74,34 @@ def generate_response(query, context):
         return response.choices[0].message.content
     except Exception as e:
         print(f"Error generating response: {e}")
-        return "There was an error processing your request."  # Or a more informative error message
+        return "There was an error processing your request."
 
-
-# Ensure the table exists when the app starts
 ensure_table_exists()
 
-# Flask endpoint for your API (if needed) - keep this for your existing API
-@app.route('/query', methods=['POST'])
-def handle_query():
-    # ... (Your existing API logic) ...
-    pass  # Keep this for your existing API functionality
-
-# Twilio webhook endpoint
 @app.route('/twilio_webhook', methods=['POST'])
 def twilio_webhook():
+    print("Raw Twilio Request Data:")
+    print(request.form)
+
     phone_number = request.form.get('From')
     message_body = request.form.get('Body')
+
+    print(f"Phone number from request: {phone_number}")
+    print(f"Message body from request: {message_body}")
 
     if not phone_number or not message_body:
         error_message = "<Response><Message>Error: Phone number and message are required.</Message></Response>"
         return error_message, 400, {'Content-Type': 'application/xml'}
 
     query_type = classify_query(message_body)
+    print(f"Query type: {query_type}")
 
     if query_type == "1":
         details = fetch_details_from_db(phone_number)
+        print(f"Details from database: {details}")
+
         if not details:
-            response_text = "No details found for that number."
+            response_text = "No details found for that number. Please make sure the number is registered."
         else:
             response_text = generate_response(message_body, details)
     elif query_type == "2":
@@ -117,10 +113,9 @@ def twilio_webhook():
     response = MessagingResponse()
     response.message(response_text)
 
-    # Correct and robust way to get the TwiML string:
     twiml_string = str(response)
 
     return twiml_string, 200, {'Content-Type': 'application/xml'}
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=4000, debug=False)  # Set debug=False in production
+    app.run(host='0.0.0.0', port=4000, debug=False)
